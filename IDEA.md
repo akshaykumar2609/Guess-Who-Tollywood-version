@@ -1,0 +1,1 @@
+Build a real-time multiplayer "Guess Who" game web application themed around Tollywood celebrities. Two players connect via a unique lobby code, communicate via P2P video/audio and text chat, and race to deduce the opponent's chosen celebrity through a process of elimination.

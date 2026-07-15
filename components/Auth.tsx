@@ -30,7 +30,13 @@ export default function Auth() {
     setInfo(null);
     const { error } = await supabase.auth.signInWithOtp({
       email,
-      options: { shouldCreateUser: true },
+      options: {
+        shouldCreateUser: true,
+        // We deliberately do NOT pass emailRedirectTo / we rely on a 6-digit
+        // code. Combined with detectSessionInUrl:false in the client, the
+        // emailed link is inert and the user MUST enter the code below.
+        data: { otp_type: "code" },
+      },
     });
     setLoading(false);
     if (error) {
@@ -38,7 +44,7 @@ export default function Auth() {
       return;
     }
     setSent(true);
-    setInfo("Check your inbox for a 6-digit code, then paste it below.");
+    setInfo("We emailed you a 6-digit code. Enter it below to sign in.");
   }
 
   async function verifyCode(e: React.FormEvent) {

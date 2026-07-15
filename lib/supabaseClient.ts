@@ -19,7 +19,11 @@ export const supabase = createClient(
     auth: {
       persistSession: true,
       autoRefreshToken: true,
-      detectSessionInUrl: true,
+      // IMPORTANT: We use Email **OTP** (a 6-digit code the user types in).
+      // If we let Supabase detect a session in the URL, any magic-link style
+      // email would auto-log the user straight into the lobby and skip the
+      // code step. Disabling this forces the code-verification flow.
+      detectSessionInUrl: false,
     },
     realtime: {
       params: { eventsPerSecond: 10 },

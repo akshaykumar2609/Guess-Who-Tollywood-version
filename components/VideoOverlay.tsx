@@ -38,12 +38,12 @@ export default function VideoOverlay({
   function toggleMute() {
     const next = !muted;
     setMuted(next);
-    peer?.setLocalMuted(next);
+    void peer?.setLocalMuted(next);
   }
   function toggleVideo() {
     const next = !hidden;
     setHidden(next);
-    peer?.setLocalVideoHidden(next);
+    void peer?.setLocalVideoHidden(next);
   }
 
   return (

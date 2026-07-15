@@ -1,9 +1,11 @@
 import type { RealtimeChannel, SupabaseClient } from "@supabase/supabase-js";
 import { ICE_SERVERS } from "./constants";
 
-type Signal =
-  | { description: RTCSessionDescriptionInit }
-  | { candidate: RTCIceCandidateInit };
+type Signal = {
+  from: string;
+  description?: RTCSessionDescriptionInit;
+  candidate?: RTCIceCandidateInit;
+};
 
 interface PeerOptions {
   supabase: SupabaseClient;
@@ -12,28 +14,30 @@ interface PeerOptions {
   userId: string;
   /** The other participant's user id. */
   remoteId: string;
-  /** The creator is the WebRTC initiator (creates the offer). */
+  /** The creator is the WebRTC initiator (impolite peer). */
   initiator: boolean;
   onRemoteStream?: (stream: MediaStream) => void;
   onStatusChange?: (status: string) => void;
 }
 
 /**
- * Minimal 1:1 WebRTC peer connection with signaling relayed through a shared
- * Supabase Realtime broadcast channel (no dedicated signaling server needed).
+ * 1:1 WebRTC peer connection with signaling relayed through a shared Supabase
+ * Realtime broadcast channel. Both peers subscribe to the SAME channel name
+ * (derived from the lobby id), so each side's broadcast reaches the other.
+ * `self: false` stops us hearing our own echoes.
  *
- * Both peers subscribe to the SAME channel name derived from the lobby id, so
- * each side's broadcast reaches the other. `self: false` stops us hearing our
- * own echoes. To avoid "glare" (both sides sending offers) only the lobby
- * creator initiates the offer; the guest answers.
+ * Negotiation uses the canonical "perfect negotiation" pattern so that
+ * connection succeeds no matter which peer joins first or how the tracks are
+ * added: only the impolite peer (creator) can win an offer collision; the
+ * polite peer (guest) rolls back and accepts. This fixes the previous bug
+ * where the single offer was sent before the guest had subscribed to the
+ * channel and then could never be retried.
  *
- * Mic/camera privacy:
- *  - Mute / hide do NOT merely flip `track.enabled` (that keeps the device
- *    powered on and the OS camera/mic indicator lit). Instead we physically
- *    STOP the track and detach it from the sender with `replaceTrack(null)`,
- *    which truly releases the hardware. Unmuting/showing re-acquires a fresh
- *    track and re-attaches it — no renegotiation required because the m-line
- *    already exists.
+ * Mic/camera privacy: Mute / Hide do NOT merely flip `track.enabled` (that
+ * keeps the device powered on and the OS camera/mic indicator lit). Instead we
+ * physically STOP the track and detach it with `replaceTrack(null)`, which
+ * truly releases the hardware. Unmuting/showing re-acquires a fresh track and
+ * re-attaches it — no renegotiation required because the m-line already exists.
  */
 export class Peer {
   private supabase: SupabaseClient;
@@ -45,11 +49,13 @@ export class Peer {
   private remoteId: string;
   private myUserId: string;
   private initiator: boolean;
+  /** The guest is the polite peer; the creator is impolite. */
+  private polite: boolean;
   private onRemoteStream?: (stream: MediaStream) => void;
   private onStatusChange?: (status: string) => void;
-  private started = false;
-  private remotePresent = false;
   private makingOffer = false;
+  private ignoreOffer = false;
+  private remotePresent = false;
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private micMuted = false;
   private camHidden = false;
@@ -59,16 +65,16 @@ export class Peer {
     this.myUserId = opts.userId;
     this.remoteId = opts.remoteId;
     this.initiator = opts.initiator;
+    this.polite = !opts.initiator;
     this.onRemoteStream = opts.onRemoteStream;
     this.onStatusChange = opts.onStatusChange;
 
-    // Shared channel so both peers receive each other's signals.
     this.channel = opts.supabase.channel(`rtc-${opts.lobbyId}`, {
       config: { broadcast: { self: false }, presence: { key: opts.userId } },
     });
 
     this.channel.on("broadcast", { event: "signal" }, ({ payload }) => {
-      const sig = payload as Signal & { from: string };
+      const sig = payload as Signal;
       if (sig.from === this.myUserId) return;
       void this.handleSignal(sig);
     });
@@ -76,24 +82,21 @@ export class Peer {
     this.channel.on("presence", { event: "sync" }, () => {
       const state = this.channel.presenceState<{ key: string }>();
       this.remotePresent = Object.keys(state).includes(this.remoteId);
-      if (this.remotePresent && this.initiator) this.maybeOffer();
+      // Make sure the peer connection exists as soon as we know the remote is
+      // around; negotiationneeded will fire the first offer.
+      this.ensurePeer();
     });
 
     this.channel.subscribe((status) => {
       this.onStatusChange?.(`channel:${status}`);
     });
 
-    // Acquire local media + build the peer connection as soon as we exist.
     void this.init();
   }
 
-  /** Acquire local media and build the RTCPeerConnection with local tracks. */
   async init() {
-    if (this.pc) return;
     await this.ensureLocalStream();
     this.ensurePeer();
-    // If the remote is already present, kick off negotiation.
-    if (this.initiator && this.remotePresent) this.maybeOffer();
   }
 
   private async ensureLocalStream(): Promise<MediaStream> {
@@ -113,7 +116,6 @@ export class Peer {
     return this.localStream;
   }
 
-  /** Returns the current local stream (may have no tracks if denied). */
   async getLocalStream(): Promise<MediaStream | null> {
     await this.ensureLocalStream();
     return this.localStream;
@@ -121,10 +123,11 @@ export class Peer {
 
   private ensurePeer(): RTCPeerConnection {
     if (this.pc) return this.pc;
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const pc = new RTCPeerConnection({
+      iceServers: ICE_SERVERS,
+      iceCandidatePoolSize: 4,
+    });
 
-    // Add whatever local tracks we currently have and remember the senders so
-    // we can later replace/remove them without touching the m-line.
     if (this.localStream) {
       for (const track of this.localStream.getTracks()) {
         const sender = pc.addTrack(track, this.localStream);
@@ -138,45 +141,33 @@ export class Peer {
     };
 
     pc.ontrack = (e) => {
-      this.onRemoteStream?.(e.streams[0]);
+      const [stream] = e.streams;
+      if (stream) this.onRemoteStream?.(stream);
     };
 
     pc.onconnectionstatechange = () => {
       this.onStatusChange?.(`peer:${pc.connectionState}`);
     };
 
-    // Defensive renegotiation (e.g. if a browser decides the m-line changed).
+    // Perfect negotiation: either side may (re)negotiate; collisions resolved.
     pc.onnegotiationneeded = async () => {
-      if (!this.initiator || this.makingOffer) return;
-      this.maybeOffer();
+      try {
+        this.makingOffer = true;
+        await pc.setLocalDescription(await pc.createOffer());
+        this.send({ description: pc.localDescription!.toJSON() });
+      } catch (err) {
+        console.warn("Negotiation failed:", err);
+      } finally {
+        this.makingOffer = false;
+      }
     };
 
     this.pc = pc;
-    if (this.pendingCandidates.length) {
-      for (const c of this.pendingCandidates) void pc.addIceCandidate(c);
-      this.pendingCandidates = [];
-    }
+    this.flushPendingCandidates();
     return pc;
   }
 
-  private async maybeOffer() {
-    if (this.started || !this.initiator) return;
-    const pc = this.ensurePeer();
-    if (!pc) return;
-    try {
-      this.makingOffer = true;
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      this.send({ description: pc.localDescription!.toJSON() });
-      this.started = true;
-    } catch (err) {
-      console.warn("createOffer failed:", err);
-    } finally {
-      this.makingOffer = false;
-    }
-  }
-
-  private send(sig: Signal) {
+  private send(sig: Omit<Signal, "from">) {
     this.channel.send({
       type: "broadcast",
       event: "signal",
@@ -184,41 +175,50 @@ export class Peer {
     });
   }
 
-  private async handleSignal(sig: Signal & { from: string }) {
+  private async handleSignal(sig: Signal) {
     const pc = this.ensurePeer();
-    if ("description" in sig) {
-      await pc.setRemoteDescription(sig.description);
-      for (const c of this.pendingCandidates) {
-        try {
-          await pc.addIceCandidate(c);
-        } catch (err) {
-          console.warn("Queued ICE add failed:", err);
+    if (pc.signalingState === "closed") return;
+    try {
+      if (sig.description) {
+        const desc = sig.description;
+        const offerCollision =
+          desc.type === "offer" &&
+          (this.makingOffer || pc.signalingState !== "stable");
+        this.ignoreOffer = !this.polite && offerCollision;
+        if (this.ignoreOffer) return;
+
+        await pc.setRemoteDescription(desc); // auto-rolls back if needed
+        this.flushPendingCandidates();
+
+        if (desc.type === "offer") {
+          await pc.setLocalDescription(await pc.createAnswer());
+          this.send({ description: pc.localDescription!.toJSON() });
         }
-      }
-      this.pendingCandidates = [];
-      if (sig.description.type === "offer") {
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        this.send({ description: pc.localDescription!.toJSON() });
-      }
-    } else if ("candidate" in sig) {
-      if (!pc.remoteDescription) {
-        this.pendingCandidates.push(sig.candidate);
-      } else {
+      } else if (sig.candidate) {
         try {
           await pc.addIceCandidate(sig.candidate);
         } catch (err) {
-          console.warn("Failed to add ICE candidate:", err);
+          if (!this.ignoreOffer) console.warn("ICE add failed:", err);
         }
       }
+    } catch (err) {
+      console.warn("handleSignal failed:", err);
     }
+  }
+
+  private flushPendingCandidates() {
+    if (!this.pc?.remoteDescription) return;
+    const pc = this.pc;
+    for (const c of this.pendingCandidates) {
+      pc.addIceCandidate(c).catch(() => {});
+    }
+    this.pendingCandidates = [];
   }
 
   /** Mute/unmute the microphone. When muted, the device is fully released. */
   async setLocalMuted(muted: boolean): Promise<void> {
     this.micMuted = muted;
     if (muted) {
-      // Stop the audio track AND detach it so the OS mic indicator turns off.
       this.localStream?.getAudioTracks().forEach((t) => t.stop());
       this.localStream
         ?.getTracks()
@@ -264,8 +264,18 @@ export class Peer {
   }
 
   close() {
-    this.channel.unsubscribe();
-    this.pc?.close();
+    try {
+      this.channel.unsubscribe();
+    } catch {
+      /* noop */
+    }
+    if (this.pc) {
+      this.pc.ontrack = null;
+      this.pc.onicecandidate = null;
+      this.pc.onnegotiationneeded = null;
+      this.pc.onconnectionstatechange = null;
+      this.pc.close();
+    }
     this.pc = null;
     this.localStream?.getTracks().forEach((t) => t.stop());
     this.localStream = null;

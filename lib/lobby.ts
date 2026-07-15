@@ -93,6 +93,7 @@ export async function updateGameState(
     celebrities: [],
     selection_started_at: null,
     selections: {},
+    selection_confirmed: {},
     main_started_at: null,
     eliminated: {},
     winner: null,

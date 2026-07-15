@@ -26,6 +26,11 @@ export interface GameState {
   selection_started_at: string | null;
   /** Per-player chosen (secret) celebrity id: { [userId]: celebrityId }. */
   selections: Record<string, string>;
+  /**
+   * Per-player explicit "I confirm my pick" flag: { [userId]: true }. The main
+   * game only starts once BOTH players have confirmed (see GameRoom flow).
+   */
+  selection_confirmed: Record<string, boolean>;
   /** ISO timestamp when the main game timer began. */
   main_started_at: string | null;
   /** Per-player eliminated celebrity ids: { [userId]: string[] }. */
@@ -58,6 +63,7 @@ export function emptyGameState(): GameState {
     celebrities: [],
     selection_started_at: null,
     selections: {},
+    selection_confirmed: {},
     main_started_at: null,
     eliminated: {},
     pending_guess: null,

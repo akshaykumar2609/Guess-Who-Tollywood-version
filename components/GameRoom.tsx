@@ -41,14 +41,13 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
 
   // timers
-  const [selRemaining, setSelRemaining] = useState(SELECTION_SECONDS);
   const [mainRemaining, setMainRemaining] = useState(0);
   const [myPick, setMyPick] = useState<string | null>(null);
   const mainStartedRef = useRef(false);
 
   const lobbyRef = useRef<Lobby | null>(null);
   const gsRef = useRef<GameState | null>(null);
-  const selTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mainTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const chatChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
@@ -152,7 +151,6 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
       supabase.removeChannel(ch);
       supabase.removeChannel(chat);
       supabase.removeChannel(notif);
-      selTimer.current && clearInterval(selTimer.current);
       mainTimer.current && clearInterval(mainTimer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -204,27 +202,47 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
     };
   }, [gs?.celebrities]);
 
-  // ---------- Selection timer ----------
+  // ---------- 30-second Inactivity Selection Timer ----------
   useEffect(() => {
-    if (phase === "selection" && gs?.selection_started_at) {
-      const start = new Date(gs.selection_started_at).getTime();
-      selTimer.current = setInterval(() => {
-        const rem = Math.max(
-          0,
-          SELECTION_SECONDS - Math.floor((Date.now() - start) / 1000)
+    if (phase === "selection" && gs?.celebrities?.length && !gs?.selection_confirmed?.[userId]) {
+      inactivityTimerRef.current = setTimeout(async () => {
+        const currentGs = gsRef.current;
+        if (!currentGs || !currentGs.celebrities || currentGs.celebrities.length === 0 || currentGs.selection_confirmed?.[userId]) return;
+
+        const pool = currentGs.celebrities;
+        const randomId = pool[Math.floor(Math.random() * pool.length)];
+        const randomCelName = celebrities.find((c) => c.id === randomId)?.name ?? "a celebrity";
+
+        setMyPick(randomId);
+        window.alert(
+          `You were inactive for 30 seconds. ${randomCelName} has been automatically assigned as your character!`
         );
-        setSelRemaining(rem);
-        if (rem <= 0) {
-          selTimer.current && clearInterval(selTimer.current);
-          void handleSelectionTimeout();
+
+        const nextGs = await updateGameState(lobbyId, (g) => ({
+          ...g,
+          selections: { ...(g.selections ?? {}), [userId]: randomId },
+          selection_confirmed: { ...(g.selection_confirmed ?? {}), [userId]: true },
+        }));
+        setInfo("Waiting for your opponent to confirm…");
+
+        const bothConfirmed =
+          nextGs.selections?.[remoteId ?? ""] &&
+          nextGs.selection_confirmed?.[remoteId ?? ""] &&
+          nextGs.selection_confirmed?.[userId];
+        if (bothConfirmed) {
+          await beginMainGame();
         }
-      }, 500);
+      }, 30000);
+
       return () => {
-        if (selTimer.current) clearInterval(selTimer.current);
+        if (inactivityTimerRef.current) {
+          clearTimeout(inactivityTimerRef.current);
+          inactivityTimerRef.current = null;
+        }
       };
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, gs?.selection_started_at]);
+  }, [phase, gs?.celebrities, gs?.selection_confirmed?.[userId]]);
 
   // ---------- Main timer ----------
   useEffect(() => {
@@ -333,36 +351,26 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
     }
   }
 
-  // Secret pick: write the chosen celebrity for this user. The main game only
-  // starts once BOTH players have also clicked Confirm (see confirmSelection).
-  async function selectCharacter(id: string) {
-    if (!lobby) return;
-    setMyPick(id);
-    await updateGameState(lobby.id, (g) => ({
-      ...g,
-      selections: { ...g.selections, [userId]: id },
-    }));
-    setInfo("Character chosen — press Confirm to lock it in.");
-  }
-
-  // Explicit confirmation after picking. Once both players confirm, the host
-  // (creator) starts the main timer. This satisfies "continue only after both
-  // players selected their desired celebrities".
-  async function confirmSelection() {
+  // Secret pick: asks for confirmation immediately on selection. If confirmed,
+  // it locks in selection and confirmation in the database simultaneously.
+  async function selectAndConfirmCharacter(id: string) {
     if (!lobby || !gs) return;
-    if (!gs.selections[userId]) {
-      setError("Pick a celebrity first.");
-      return;
-    }
-    await updateGameState(lobby.id, (g) => ({
+    const name = celebrities.find((c) => c.id === id)?.name ?? "this celebrity";
+    const ok = window.confirm(`Do you want to select ${name} as your secret character?`);
+    if (!ok) return;
+
+    setMyPick(id);
+    const nextGs = await updateGameState(lobby.id, (g) => ({
       ...g,
-      selection_confirmed: { ...g.selection_confirmed, [userId]: true },
+      selections: { ...(g.selections ?? {}), [userId]: id },
+      selection_confirmed: { ...(g.selection_confirmed ?? {}), [userId]: true },
     }));
     setInfo("Waiting for your opponent to confirm…");
 
     const bothConfirmed =
-      gs.selections[remoteId ?? ""] &&
-      gs.selection_confirmed?.[remoteId ?? ""];
+      nextGs.selections?.[remoteId ?? ""] &&
+      nextGs.selection_confirmed?.[remoteId ?? ""] &&
+      nextGs.selection_confirmed?.[userId];
     if (bothConfirmed) {
       await beginMainGame();
     }
@@ -373,32 +381,6 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
     mainStartedRef.current = true;
     const next = await updateGameState(lobby.id, (g) => ({
       ...g,
-      main_started_at: new Date().toISOString(),
-    }));
-    setGs(next);
-    setPhase("main");
-    setInfo(null);
-  }
-
-  async function handleSelectionTimeout() {
-    if (!lobby) return;
-    const g = gsRef.current;
-    if (!g) return;
-    const sel = { ...g.selections };
-    if (!sel[userId])
-      sel[userId] =
-        g.celebrities[Math.floor(Math.random() * g.celebrities.length)];
-    if (!sel[remoteId ?? ""])
-      sel[remoteId ?? ""] =
-        g.celebrities[Math.floor(Math.random() * g.celebrities.length)];
-    const next = await updateGameState(lobby.id, (gg) => ({
-      ...gg,
-      selections: sel,
-      // auto-confirm both on timeout so the game proceeds
-      selection_confirmed: {
-        [userId]: true,
-        [remoteId ?? ""]: true,
-      },
       main_started_at: new Date().toISOString(),
     }));
     setGs(next);
@@ -437,7 +419,7 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
   async function confirmGuess(confirm: boolean) {
     if (!lobby || !gs?.pending_guess) return;
     const { by, celebrityId } = gs.pending_guess;
-    if (confirm && gs.selections[userId] === celebrityId) {
+    if (confirm && gs?.selections?.[userId] === celebrityId) {
       const nextGs = {
         ...gs,
         winner: by,
@@ -494,12 +476,12 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
     if (!lobby || !gs) return;
     const myAlive =
       celebrities.length -
-      (gs.eliminated[userId]?.length ?? 0) -
-      (gs.selections[userId] ? 1 : 0);
+      (gs?.eliminated?.[userId]?.length ?? 0) -
+      (gs?.selections?.[userId] ? 1 : 0);
     const oppAlive =
       celebrities.length -
-      (gs.eliminated[remoteId ?? ""]?.length ?? 0) -
-      (gs.selections[remoteId ?? ""] ? 1 : 0);
+      (gs?.eliminated?.[remoteId ?? ""]?.length ?? 0) -
+      (gs?.selections?.[remoteId ?? ""] ? 1 : 0);
     const winner =
       myAlive === 1 ? userId : oppAlive === 1 ? remoteId ?? userId : userId;
     
@@ -651,39 +633,29 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
           <div className="space-y-3">
             {phase === "selection" && (
               <div className="rounded-xl bg-tolly-panel/70 p-3">
-                <div className="mb-2 flex items-center justify-between">
+                <div className="mb-2">
                   <span className="text-sm font-semibold text-tolly-gold">
                     Secret pick — choose your character
                   </span>
-                  <Timer remaining={selRemaining} total={SELECTION_SECONDS} danger />
                 </div>
                 <p className="mb-2 text-xs text-tolly-muted">
-                  Click a card to be that celebrity. Your opponent must guess it.
-                  Then press <b>Confirm</b> — the game starts only once you{" "}
-                  <b>both</b> confirm.
+                  {gs?.selection_confirmed?.[userId]
+                    ? "You locked in your character. Waiting for the other player to confirm."
+                    : "Click a card to select your character. You have 30 seconds of inactivity before a character is auto-assigned."}
                 </p>
                 <GameBoard
                   celebrities={celebrities}
                   eliminated={[]}
                   mySelection={myPick ?? undefined}
-                  phase="select"
-                  onSelectCharacter={selectCharacter}
+                  phase={gs?.selection_confirmed?.[userId] ? "ended" : "select"}
+                  onSelectCharacter={selectAndConfirmCharacter}
                   onToggleEliminate={() => { }}
                 />
-                <div className="mt-3 flex items-center justify-between">
-                  <span className="text-xs text-tolly-muted">
-                    {gs?.selection_confirmed?.[userId]
-                      ? "✓ You confirmed"
-                      : "Pick a card, then confirm"}
-                  </span>
-                  <Button
-                    variant="primary"
-                    disabled={!myPick || !!gs?.selection_confirmed?.[userId]}
-                    onClick={() => void confirmSelection()}
-                  >
-                    {gs?.selection_confirmed?.[userId] ? "Confirmed" : "Confirm"}
-                  </Button>
-                </div>
+                {gs?.selection_confirmed?.[userId] && (
+                  <div className="mt-3 text-center text-xs font-semibold text-tolly-gold">
+                    ✓ Selection confirmed. Waiting for opponent...
+                  </div>
+                )}
               </div>
             )}
 
@@ -721,7 +693,7 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
                 won={gs?.winner === userId}
                 wonByGuess={gs?.won_by_guess ?? null}
                 opponentChar={
-                  celebrities.find((c) => c.id === gs?.selections[remoteId ?? ""])
+                  celebrities.find((c) => c.id === gs?.selections?.[remoteId ?? ""])
                     ?.name
                 }
                 isCreator={isCreator}
@@ -740,7 +712,7 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
               ?.name ?? "?"
           }
           isCorrect={
-            gs?.selections[userId] === gs?.pending_guess?.celebrityId
+            gs?.selections?.[userId] === gs?.pending_guess?.celebrityId
           }
           onConfirm={() => void confirmGuess(true)}
           onReject={() => void confirmGuess(false)}

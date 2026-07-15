@@ -44,7 +44,7 @@ export default function Auth() {
       return;
     }
     setSent(true);
-    setInfo("We emailed you a 6-digit code. Enter it below to sign in.");
+    setInfo("We emailed you an 8-digit code. Enter it below to sign in.");
   }
 
   async function verifyCode(e: React.FormEvent) {
@@ -92,8 +92,8 @@ export default function Auth() {
             required
             value={code}
             onChange={(e) => setCode(e.target.value)}
-            placeholder="123456"
-            className="w-full rounded-xl border border-white/10 bg-tolly-ink px-4 py-2.5 text-center text-lg tracking-[0.5em] text-white outline-none focus:border-tolly-gold"
+            placeholder="12345678"
+            className="w-full rounded-xl border border-white/10 bg-tolly-ink px-4 py-2.5 text-center text-lg tracking-[0.3em] text-white outline-none focus:border-tolly-gold"
           />
           <Button type="submit" disabled={loading} className="w-full">
             {loading ? "Verifying…" : "Verify"}

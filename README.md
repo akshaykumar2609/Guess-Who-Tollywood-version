@@ -135,7 +135,7 @@ To test the real-time WebRTC and lobby features on a single computer, use two di
 Before deploying your game for public play:
 
 1.  **TURN Servers:** Add a TURN server provider (like Twilio Network Traversal or Xirsys) in [lib/constants.ts](file:///c:/Users/aksha/Guess%20who/lib/constants.ts#L19-L22) to ensure WebRTC connections work smoothly behind symmetric firewalls and strict NATs.
-2.  **Real Celebrity Photos:** By default, the seed data uses `ui-avatars.com` placeholders. Update the `image_url` column in the `celebrities` table with real hosted photos of the celebrities.
+2.  **Real Celebrity Photos:** By default, the seed data uses `ui-avatars.com` placeholders. Update the `image_url` column in the `celebrities` table with real hosted photos of the celebrities. You can use [wiki-image-downloader](https://github.com/akshaykumar2609/wiki-image-downloader.git) to get celebrity images from Wikipedia.
 3.  **Lobby Rate Limiting:** The 6-character room codes provide ~1 billion unique lobbies, which is secure against collisions. For full-scale production, implement rate limiting on the `lobbies` table insert operations using Postgres triggers.
 
 ---

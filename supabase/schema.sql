@@ -134,7 +134,9 @@ create policy "lobbies_insert" on public.lobbies
 
 drop policy if exists "lobbies_update" on public.lobbies;
 create policy "lobbies_update" on public.lobbies
-  for update using (auth.uid() in (creator_id, guest_id));
+  for update
+  using (auth.uid() = creator_id or auth.uid() = guest_id or guest_id is null)
+  with check (auth.uid() = creator_id or auth.uid() = guest_id);
 
 -- -----------------------------------------------------------------------------
 -- Realtime: the app subscribes to postgres_changes on `lobbies`.
@@ -148,52 +150,52 @@ alter publication supabase_realtime add table public.lobbies;
 -- =============================================================================
 insert into public.celebrities (name, image_url, gender, role) values
   -- Heroes (male)
-  ('Chiranjeevi',      'https://ui-avatars.com/api/?name=Chiranjeevi&background=1d2440&color=f5c518&size=300&bold=true', 'male',   'hero'),
-  ('Pawan Kalyan',     'https://ui-avatars.com/api/?name=Pawan+Kalyan&background=1d2440&color=f5c518&size=300&bold=true', 'male',   'hero'),
-  ('Mahesh Babu',      'https://ui-avatars.com/api/?name=Mahesh+Babu&background=1d2440&color=f5c518&size=300&bold=true', 'male',   'hero'),
-  ('Jr NTR',           'https://ui-avatars.com/api/?name=Jr+NTR&background=1d2440&color=f5c518&size=300&bold=true', 'male',   'hero'),
-  ('Ram Charan',       'https://ui-avatars.com/api/?name=Ram+Charan&background=1d2440&color=f5c518&size=300&bold=true', 'male',   'hero'),
-  ('Allu Arjun',       'https://ui-avatars.com/api/?name=Allu+Arjun&background=1d2440&color=f5c518&size=300&bold=true', 'male',   'hero'),
-  ('Prabhas',          'https://ui-avatars.com/api/?name=Prabhas&background=1d2440&color=f5c518&size=300&bold=true', 'male',   'hero'),
-  ('Vijay Deverakonda','https://ui-avatars.com/api/?name=Vijay+Deverakonda&background=1d2440&color=f5c518&size=300&bold=true', 'male', 'hero'),
-  ('Nani',             'https://ui-avatars.com/api/?name=Nani&background=1d2440&color=f5c518&size=300&bold=true', 'male',   'hero'),
-  ('Ravi Teja',        'https://ui-avatars.com/api/?name=Ravi+Teja&background=1d2440&color=f5c518&size=300&bold=true', 'male',  'hero'),
-  ('Naga Chaitanya',   'https://ui-avatars.com/api/?name=Naga+Chaitanya&background=1d2440&color=f5c518&size=300&bold=true', 'male', 'hero'),
-  ('Venkatesh',        'https://ui-avatars.com/api/?name=Venkatesh&background=1d2440&color=f5c518&size=300&bold=true', 'male','hero'),
-  ('Nagarjuna',        'https://ui-avatars.com/api/?name=Nagarjuna&background=1d2440&color=f5c518&size=300&bold=true', 'male','hero'),
-  ('Balakrishna',      'https://ui-avatars.com/api/?name=Balakrishna&background=1d2440&color=f5c518&size=300&bold=true', 'male', 'hero'),
+  ('Chiranjeevi',      'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Chiranjeevi.jpg', 'male',   'hero'),
+  ('Pawan Kalyan',     'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Pawan%20Kalyan.jpg', 'male',   'hero'),
+  ('Mahesh Babu',      'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Mahesh%20Babu.jpg', 'male',   'hero'),
+  ('Jr NTR',           'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Jr%20NTR.jpg', 'male',   'hero'),
+  ('Ram Charan',       'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Ram%20Charan.jpg', 'male',   'hero'),
+  ('Allu Arjun',       'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Allu%20Arjun.jpg', 'male',   'hero'),
+  ('Prabhas',          'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Prabhas.jpg', 'male',   'hero'),
+  ('Vijay Deverakonda','https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Vijay%20Deverakonda.jpg', 'male', 'hero'),
+  ('Nani',             'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Nani.jpg', 'male',   'hero'),
+  ('Ravi Teja',        'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Ravi%20Teja.jpg', 'male',  'hero'),
+  ('Naga Chaitanya',   'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Naga%20Chaitanya.jpg', 'male', 'hero'),
+  ('Venkatesh',        'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Venkatesh.jpg', 'male','hero'),
+  ('Nagarjuna',        'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Nagarjuna.jpg', 'male','hero'),
+  ('Balakrishna',      'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Balakrishna.jpg', 'male', 'hero'),
   -- Heroines (female)
-  ('Samantha',         'https://ui-avatars.com/api/?name=Samantha&background=1d2440&color=f5c518&size=300&bold=true', 'female','heroine'),
-  ('Kajal Aggarwal',   'https://ui-avatars.com/api/?name=Kajal+Aggarwal&background=1d2440&color=f5c518&size=300&bold=true', 'female','heroine'),
-  ('Anushka Shetty',   'https://ui-avatars.com/api/?name=Anushka+Shetty&background=1d2440&color=f5c518&size=300&bold=true', 'female','heroine'),
-  ('Tamannaah',        'https://ui-avatars.com/api/?name=Tamannaah&background=1d2440&color=f5c518&size=300&bold=true', 'female','heroine'),
-  ('Pooja Hegde',      'https://ui-avatars.com/api/?name=Pooja+Hegde&background=1d2440&color=f5c518&size=300&bold=true', 'female','heroine'),
-  ('Rakul Preet Singh', 'https://ui-avatars.com/api/?name=Rakul+Preet+Singh&background=1d2440&color=f5c518&size=300&bold=true', 'female','heroine'),
-  ('Sai Pallavi',      'https://ui-avatars.com/api/?name=Sai+Pallavi&background=1d2440&color=f5c518&size=300&bold=true', 'female','heroine'),
-  ('Rashmika Mandanna', 'https://ui-avatars.com/api/?name=Rashmika+Mandanna&background=1d2440&color=f5c518&size=300&bold=true', 'female','heroine'),
-  ('Keerthy Suresh',   'https://ui-avatars.com/api/?name=Keerthy+Suresh&background=1d2440&color=f5c518&size=300&bold=true', 'female','heroine'),
-  ('Nithya Menen',     'https://ui-avatars.com/api/?name=Nithya+Menen&background=1d2440&color=f5c518&size=300&bold=true', 'female','heroine'),
+  ('Samantha',         'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Samantha.jpg', 'female','heroine'),
+  ('Kajal Aggarwal',   'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Kajal%20Aggarwal.jpg', 'female','heroine'),
+  ('Anushka Shetty',   'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Anushka%20Shetty.jpg', 'female','heroine'),
+  ('Tamannaah',        'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Tamannaah.jpg', 'female','heroine'),
+  ('Pooja Hegde',      'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Pooja%20Hegde.jpg', 'female','heroine'),
+  ('Rakul Preet Singh', 'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Rakul%20Preet%20Singh.jpg', 'female','heroine'),
+  ('Sai Pallavi',      'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Sai%20Pallavi.jpg', 'female','heroine'),
+  ('Rashmika Mandanna', 'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Rashmika%20Mandanna.jpg', 'female','heroine'),
+  ('Keerthy Suresh',   'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Keerthy%20Suresh.jpg', 'female','heroine'),
+  ('Nithya Menen',     'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Nithya%20Menen.jpg', 'female','heroine'),
   -- Directors
-  ('S S Rajamouli',    'https://ui-avatars.com/api/?name=SS+Rajamouli&background=1d2440&color=f5c518&size=300&bold=true', 'male','director'),
-  ('Trivikram Srinivas','https://ui-avatars.com/api/?name=Trivikram+Srinivas&background=1d2440&color=f5c518&size=300&bold=true', 'male','director'),
-  ('Sukumar',          'https://ui-avatars.com/api/?name=Sukumar&background=1d2440&color=f5c518&size=300&bold=true', 'male','director'),
-  ('Koratala Siva',    'https://ui-avatars.com/api/?name=Koratala+Siva&background=1d2440&color=f5c518&size=300&bold=true', 'male','director'),
-  ('Boyapati Srinu',   'https://ui-avatars.com/api/?name=Boyapati+Srinu&background=1d2440&color=f5c518&size=300&bold=true', 'male','director'),
-  ('Vamshi Paidipally', 'https://ui-avatars.com/api/?name=Vamshi+Paidipally&background=1d2440&color=f5c518&size=300&bold=true', 'male','director'),
+  ('S S Rajamouli',    'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/S%20S%20Rajamouli.jpg', 'male','director'),
+  ('Trivikram Srinivas','https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Trivikram%20Srinivas.jpg', 'male','director'),
+  ('Sukumar',          'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Sukumar.jpg', 'male','director'),
+  ('Koratala Siva',    'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Koratala%20Siva.jpg', 'male','director'),
+  ('Boyapati Srinu',   'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Boyapati%20Srinu.jpg', 'male','director'),
+  ('Vamshi Paidipally', 'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Vamshi%20Paidipally.jpg', 'male','director'),
   -- Villains
-  ('Jagapathi Babu',   'https://ui-avatars.com/api/?name=Jagapathi+Babu&background=1d2440&color=f5c518&size=300&bold=true', 'male','villain'),
-  ('Prakash Raj',      'https://ui-avatars.com/api/?name=Prakash+Raj&background=1d2440&color=f5c518&size=300&bold=true', 'male','villain'),
-  ('Rao Ramesh',       'https://ui-avatars.com/api/?name=Rao+Ramesh&background=1d2440&color=f5c518&size=300&bold=true', 'male','villain'),
-  ('Sai Kumar',        'https://ui-avatars.com/api/?name=Sai+Kumar&background=1d2440&color=f5c518&size=300&bold=true', 'male','villain'),
-  ('Sarathkumar',      'https://ui-avatars.com/api/?name=Sarathkumar&background=1d2440&color=f5c518&size=300&bold=true', 'male','villain'),
+  ('Jagapathi Babu',   'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Jagapathi%20Babu.jpg', 'male','villain'),
+  ('Prakash Raj',      'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Prakash%20Raj.jpg', 'male','villain'),
+  ('Rao Ramesh',       'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Rao%20Ramesh.jpg', 'male','villain'),
+  ('Sai Kumar',        'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Sai%20Kumar.jpg', 'male','villain'),
+  ('Sarathkumar',      'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Sarathkumar.jpg', 'male','villain'),
   -- Comedians
-  ('Brahmanandam',     'https://ui-avatars.com/api/?name=Brahmanandam&background=1d2440&color=f5c518&size=300&bold=true', 'male','comedian'),
-  ('Ali',              'https://ui-avatars.com/api/?name=Ali&background=1d2440&color=f5c518&size=300&bold=true', 'male','comedian'),
-  ('Sunil',            'https://ui-avatars.com/api/?name=Sunil&background=1d2440&color=f5c518&size=300&bold=true', 'male','comedian'),
-  ('Vennela Kishore',  'https://ui-avatars.com/api/?name=Vennela+Kishore&background=1d2440&color=f5c518&size=300&bold=true', 'male','comedian'),
+  ('Brahmanandam',     'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Brahmanandam.jpg', 'male','comedian'),
+  ('Ali',              'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Ali.jpg', 'male','comedian'),
+  ('Sunil',            'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Sunil.jpg', 'male','comedian'),
+  ('Vennela Kishore',  'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Vennela%20Kishore.jpg', 'male','comedian'),
   -- Character artists
-  ('Tanikella Bharani', 'https://ui-avatars.com/api/?name=Tanikella+Bharani&background=1d2440&color=f5c518&size=300&bold=true', 'male','character artist'),
-  ('Nassar',           'https://ui-avatars.com/api/?name=Nassar&background=1d2440&color=f5c518&size=300&bold=true', 'male','character artist'),
-  ('Murali Sharma',    'https://ui-avatars.com/api/?name=Murali+Sharma&background=1d2440&color=f5c518&size=300&bold=true', 'male','character artist'),
-  ('Posani Krishna Murali', 'https://ui-avatars.com/api/?name=Posani+Krishna+Murali&background=1d2440&color=f5c518&size=300&bold=true', 'male','character artist')
+  ('Tanikella Bharani', 'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Tanikella%20Bharani.jpg', 'male','character artist'),
+  ('Nassar',           'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Nassar.jpg', 'male','character artist'),
+  ('Murali Sharma',    'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Murali%20Sharma.jpg', 'male','character artist'),
+  ('Posani Krishna Murali', 'https://tpdbgiceucfxdhusgyii.supabase.co/storage/v1/object/public/celebrities/Posani%20Krishna%20Murali.jpg', 'male','character artist')
 on conflict do nothing;

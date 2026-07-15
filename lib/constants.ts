@@ -19,4 +19,15 @@ export function mainTimerSeconds(count: number): number {
 export const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
+  // Optional TURN server for peers behind symmetric/strict NATs. Set these
+  // via NEXT_PUBLIC_TURN_* env vars (see setup.md). Leave unset for STUN-only.
+  ...(process.env.NEXT_PUBLIC_TURN_URL
+    ? [
+        {
+          urls: process.env.NEXT_PUBLIC_TURN_URL.split(","),
+          username: process.env.NEXT_PUBLIC_TURN_USERNAME ?? "",
+          credential: process.env.NEXT_PUBLIC_TURN_CREDENTIAL ?? "",
+        } as RTCIceServer,
+      ]
+    : []),
 ];

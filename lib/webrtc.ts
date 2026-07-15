@@ -25,14 +25,23 @@ interface PeerOptions {
  * Both peers subscribe to the SAME channel name derived from the lobby id, so
  * each side's broadcast reaches the other. `self: false` stops us hearing our
  * own echoes. To avoid "glare" (both sides sending offers) only the lobby
- * creator initiates the offer; the guest answers. Presence is used to wait
- * until the remote peer is actually subscribed before the creator offers.
+ * creator initiates the offer; the guest answers.
+ *
+ * Mic/camera privacy:
+ *  - Mute / hide do NOT merely flip `track.enabled` (that keeps the device
+ *    powered on and the OS camera/mic indicator lit). Instead we physically
+ *    STOP the track and detach it from the sender with `replaceTrack(null)`,
+ *    which truly releases the hardware. Unmuting/showing re-acquires a fresh
+ *    track and re-attaches it — no renegotiation required because the m-line
+ *    already exists.
  */
 export class Peer {
   private supabase: SupabaseClient;
   private channel: RealtimeChannel;
   private pc: RTCPeerConnection | null = null;
   private localStream: MediaStream | null = null;
+  private audioSender: RTCRtpSender | null = null;
+  private videoSender: RTCRtpSender | null = null;
   private remoteId: string;
   private myUserId: string;
   private initiator: boolean;
@@ -40,7 +49,10 @@ export class Peer {
   private onStatusChange?: (status: string) => void;
   private started = false;
   private remotePresent = false;
+  private makingOffer = false;
   private pendingCandidates: RTCIceCandidateInit[] = [];
+  private micMuted = false;
+  private camHidden = false;
 
   constructor(opts: PeerOptions) {
     this.supabase = opts.supabase;
@@ -63,11 +75,8 @@ export class Peer {
 
     this.channel.on("presence", { event: "sync" }, () => {
       const state = this.channel.presenceState<{ key: string }>();
-      const keys = Object.keys(state);
-      this.remotePresent = keys.includes(this.remoteId);
-      if (this.remotePresent && this.initiator && this.initialized && !this.started) {
-        void this.start();
-      }
+      this.remotePresent = Object.keys(state).includes(this.remoteId);
+      if (this.remotePresent && this.initiator) this.maybeOffer();
     });
 
     this.channel.subscribe((status) => {
@@ -80,33 +89,33 @@ export class Peer {
 
   /** Acquire local media and build the RTCPeerConnection with local tracks. */
   async init() {
-    if (this.initialized) return;
-    this.initialized = true;
-    await this.getLocalStream();
+    if (this.pc) return;
+    await this.ensureLocalStream();
     this.ensurePeer();
-    if (this.initiator && this.remotePresent && !this.started) {
-      void this.start();
-    }
+    // If the remote is already present, kick off negotiation.
+    if (this.initiator && this.remotePresent) this.maybeOffer();
   }
 
-  private initialized = false;
-
-  /** Acquire the local camera + mic. Resolves once available. */
-  async getLocalStream(): Promise<MediaStream> {
+  private async ensureLocalStream(): Promise<MediaStream> {
     if (this.localStream) return this.localStream;
+    this.localStream = new MediaStream();
     try {
-      this.localStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: !this.camHidden,
+        audio: !this.micMuted,
       });
+      for (const track of stream.getTracks()) {
+        this.localStream.addTrack(track);
+      }
     } catch (err) {
-      // Fall back to audio-only so the game still works without a camera.
-      console.warn("getUserMedia video failed, trying audio only:", err);
-      this.localStream = await navigator.mediaDevices.getUserMedia({
-        video: false,
-        audio: true,
-      });
+      console.warn("getUserMedia failed (continuing without media):", err);
     }
+    return this.localStream;
+  }
+
+  /** Returns the current local stream (may have no tracks if denied). */
+  async getLocalStream(): Promise<MediaStream | null> {
+    await this.ensureLocalStream();
     return this.localStream;
   }
 
@@ -114,16 +123,18 @@ export class Peer {
     if (this.pc) return this.pc;
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
 
+    // Add whatever local tracks we currently have and remember the senders so
+    // we can later replace/remove them without touching the m-line.
     if (this.localStream) {
       for (const track of this.localStream.getTracks()) {
-        pc.addTrack(track, this.localStream);
+        const sender = pc.addTrack(track, this.localStream);
+        if (track.kind === "audio") this.audioSender = sender;
+        if (track.kind === "video") this.videoSender = sender;
       }
     }
 
     pc.onicecandidate = (e) => {
-      if (e.candidate) {
-        this.send({ candidate: e.candidate.toJSON() });
-      }
+      if (e.candidate) this.send({ candidate: e.candidate.toJSON() });
     };
 
     pc.ontrack = (e) => {
@@ -134,13 +145,35 @@ export class Peer {
       this.onStatusChange?.(`peer:${pc.connectionState}`);
     };
 
+    // Defensive renegotiation (e.g. if a browser decides the m-line changed).
+    pc.onnegotiationneeded = async () => {
+      if (!this.initiator || this.makingOffer) return;
+      this.maybeOffer();
+    };
+
     this.pc = pc;
-    // Flush any ICE candidates that arrived before remoteDescription was set.
     if (this.pendingCandidates.length) {
       for (const c of this.pendingCandidates) void pc.addIceCandidate(c);
       this.pendingCandidates = [];
     }
     return pc;
+  }
+
+  private async maybeOffer() {
+    if (this.started || !this.initiator) return;
+    const pc = this.ensurePeer();
+    if (!pc) return;
+    try {
+      this.makingOffer = true;
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      this.send({ description: pc.localDescription!.toJSON() });
+      this.started = true;
+    } catch (err) {
+      console.warn("createOffer failed:", err);
+    } finally {
+      this.makingOffer = false;
+    }
   }
 
   private send(sig: Signal) {
@@ -151,24 +184,10 @@ export class Peer {
     });
   }
 
-  /** Begin negotiation (initiator only; guest waits for the offer). */
-  async start() {
-    if (this.started) return;
-    this.started = true;
-    // init() has already built the pc with local tracks; just send the offer.
-    const pc = this.ensurePeer();
-    if (!this.initiator) return;
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    this.send({ description: pc.localDescription!.toJSON() });
-  }
-
   private async handleSignal(sig: Signal & { from: string }) {
     const pc = this.ensurePeer();
     if ("description" in sig) {
       await pc.setRemoteDescription(sig.description);
-      // Apply any queued ICE candidates now that remote description is set.
       for (const c of this.pendingCandidates) {
         try {
           await pc.addIceCandidate(c);
@@ -183,7 +202,6 @@ export class Peer {
         this.send({ description: pc.localDescription!.toJSON() });
       }
     } else if ("candidate" in sig) {
-      // Buffer candidates if remote description isn't ready yet.
       if (!pc.remoteDescription) {
         this.pendingCandidates.push(sig.candidate);
       } else {
@@ -196,15 +214,52 @@ export class Peer {
     }
   }
 
-  setLocalMuted(muted: boolean) {
-    if (this.localStream) {
-      this.localStream.getAudioTracks().forEach((t) => (t.enabled = !muted));
+  /** Mute/unmute the microphone. When muted, the device is fully released. */
+  async setLocalMuted(muted: boolean): Promise<void> {
+    this.micMuted = muted;
+    if (muted) {
+      // Stop the audio track AND detach it so the OS mic indicator turns off.
+      this.localStream?.getAudioTracks().forEach((t) => t.stop());
+      this.localStream
+        ?.getTracks()
+        .filter((t) => t.kind === "audio")
+        .forEach((t) => this.localStream!.removeTrack(t));
+      await this.audioSender?.replaceTrack(null);
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const track = stream.getAudioTracks()[0];
+        if (track) {
+          this.localStream?.addTrack(track);
+          await this.audioSender?.replaceTrack(track);
+        }
+      } catch (err) {
+        console.warn("Could not re-acquire mic:", err);
+      }
     }
   }
 
-  setLocalVideoHidden(hidden: boolean) {
-    if (this.localStream) {
-      this.localStream.getVideoTracks().forEach((t) => (t.enabled = !hidden));
+  /** Hide/show the camera. When hidden, the device is fully released. */
+  async setLocalVideoHidden(hidden: boolean): Promise<void> {
+    this.camHidden = hidden;
+    if (hidden) {
+      this.localStream?.getVideoTracks().forEach((t) => t.stop());
+      this.localStream
+        ?.getTracks()
+        .filter((t) => t.kind === "video")
+        .forEach((t) => this.localStream!.removeTrack(t));
+      await this.videoSender?.replaceTrack(null);
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        const track = stream.getVideoTracks()[0];
+        if (track) {
+          this.localStream?.addTrack(track);
+          await this.videoSender?.replaceTrack(track);
+        }
+      } catch (err) {
+        console.warn("Could not re-acquire camera:", err);
+      }
     }
   }
 
@@ -214,5 +269,7 @@ export class Peer {
     this.pc = null;
     this.localStream?.getTracks().forEach((t) => t.stop());
     this.localStream = null;
+    this.audioSender = null;
+    this.videoSender = null;
   }
 }

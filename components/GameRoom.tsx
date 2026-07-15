@@ -41,6 +41,8 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
   // timers
   const [selRemaining, setSelRemaining] = useState(SELECTION_SECONDS);
   const [mainRemaining, setMainRemaining] = useState(0);
+  const [myPick, setMyPick] = useState<string | null>(null);
+  const mainStartedRef = useRef(false);
 
   const lobbyRef = useRef<Lobby | null>(null);
   const gsRef = useRef<GameState | null>(null);
@@ -48,6 +50,7 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
   const mainTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const chatChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const notifChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   const isCreator = lobby?.creator_id === userId;
   const remoteId =
@@ -73,11 +76,12 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
       setLobby(l);
       const g = (l.game_state as GameState) ?? emptyState();
       setGs(g);
+      setMyPick(g.selections?.[userId] ?? null);
       if (l.status === "completed" || g.winner) setPhase("ended");
     } catch (e: any) {
       setError(e.message);
     }
-  }, [lobbyId]);
+  }, [lobbyId, userId]);
 
   useEffect(() => {
     void load();
@@ -97,6 +101,7 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
           setLobby(nl);
           const ng = (nl.game_state as GameState) ?? emptyState();
           setGs(ng);
+          setMyPick(ng.selections?.[userId] ?? null);
           if (nl.status === "completed" || ng.winner) setPhase("ended");
         }
       )
@@ -112,15 +117,34 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
       .subscribe();
     chatChannelRef.current = chat;
 
+    // Explicit, low-latency notification channel for the guess flow. This is
+    // what makes Player 1 reliably learn that Player 2 confirmed/rejected a
+    // guess (postgres_changes alone could lag or arrive in a bad order).
+    const notif = supabase
+      .channel(`notif-${lobbyId}`)
+      .on("broadcast", { event: "guess" }, ({ payload }) => {
+        const p = payload as { type: string };
+        if (p.type === "submitted") {
+          setInfo("Opponent is reviewing your guess…");
+        } else if (p.type === "resolved") {
+          setInfo("Opponent responded to your guess.");
+        }
+      })
+      .subscribe();
+    notifChannelRef.current = notif;
+
     return () => {
       supabase.removeChannel(ch);
       supabase.removeChannel(chat);
+      supabase.removeChannel(notif);
       selTimer.current && clearInterval(selTimer.current);
       mainTimer.current && clearInterval(mainTimer.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lobbyId, load]);
 
   // ---------- React to phase derived from gs + statuses ----------
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!lobby) return;
     if (lobby.status === "completed" || gs?.winner) {
@@ -128,15 +152,26 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
       return;
     }
     if (lobby.status === "in_progress") {
-      if (gs?.selections && Object.keys(gs.selections).length === 2) {
+      const sel = gs?.selections ?? {};
+      const bothPicked = sel[userId] && sel[remoteId ?? ""];
+      const bothConfirmed =
+        gs?.selection_confirmed?.[userId] &&
+        gs?.selection_confirmed?.[remoteId ?? ""];
+      if (bothPicked && bothConfirmed && gs?.main_started_at) {
         setPhase("main");
+      } else if (bothPicked && bothConfirmed && !gs?.main_started_at) {
+        // Both confirmed but the main timer hasn't been stamped yet. Only the
+        // creator stamps it (avoids a double-write race), then it propagates
+        // via realtime to the guest.
+        if (isCreator) void beginMainGame();
+        setPhase("selection");
       } else {
         setPhase("selection");
       }
     } else if (lobby.status === "ready" || lobby.status === "waiting") {
       setPhase("waiting");
     }
-  }, [lobby, gs]);
+  }, [lobby, gs, userId, remoteId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------- Load celebrity details when game_state.celebrities is set ----------
   useEffect(() => {
@@ -232,6 +267,7 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
         celebrities: ids,
         selection_started_at: new Date().toISOString(),
         selections: {},
+        selection_confirmed: {},
         eliminated: {},
         pending_guess: null,
         winner: null,
@@ -251,13 +287,51 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
     }
   }
 
+  // Secret pick: write the chosen celebrity for this user. The main game only
+  // starts once BOTH players have also clicked Confirm (see confirmSelection).
   async function selectCharacter(id: string) {
     if (!lobby) return;
+    setMyPick(id);
     await updateGameState(lobby.id, (g) => ({
       ...g,
       selections: { ...g.selections, [userId]: id },
     }));
-    setInfo("Character locked in. Waiting for opponent…");
+    setInfo("Character chosen — press Confirm to lock it in.");
+  }
+
+  // Explicit confirmation after picking. Once both players confirm, the host
+  // (creator) starts the main timer. This satisfies "continue only after both
+  // players selected their desired celebrities".
+  async function confirmSelection() {
+    if (!lobby || !gs) return;
+    if (!gs.selections[userId]) {
+      setError("Pick a celebrity first.");
+      return;
+    }
+    await updateGameState(lobby.id, (g) => ({
+      ...g,
+      selection_confirmed: { ...g.selection_confirmed, [userId]: true },
+    }));
+    setInfo("Waiting for your opponent to confirm…");
+
+    const bothConfirmed =
+      gs.selections[remoteId ?? ""] &&
+      gs.selection_confirmed?.[remoteId ?? ""];
+    if (bothConfirmed) {
+      await beginMainGame();
+    }
+  }
+
+  async function beginMainGame() {
+    if (!lobby || mainStartedRef.current) return;
+    mainStartedRef.current = true;
+    const next = await updateGameState(lobby.id, (g) => ({
+      ...g,
+      main_started_at: new Date().toISOString(),
+    }));
+    setGs(next);
+    setPhase("main");
+    setInfo(null);
   }
 
   async function handleSelectionTimeout() {
@@ -274,10 +348,16 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
     const next = await updateGameState(lobby.id, (gg) => ({
       ...gg,
       selections: sel,
+      // auto-confirm both on timeout so the game proceeds
+      selection_confirmed: {
+        [userId]: true,
+        [remoteId ?? ""]: true,
+      },
       main_started_at: new Date().toISOString(),
     }));
     setGs(next);
     setPhase("main");
+    setInfo(null);
   }
 
   async function toggleEliminate(id: string) {
@@ -300,6 +380,12 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
       pending_guess: { by: userId, celebrityId: id },
     }));
     setInfo("Guess submitted — waiting for opponent to confirm…");
+    // Tell the opponent immediately (reliable, low-latency path).
+    notifChannelRef.current?.send({
+      type: "broadcast",
+      event: "guess",
+      payload: { type: "submitted", by: userId, celebrityId: id },
+    });
   }
 
   async function confirmGuess(confirm: boolean) {
@@ -319,12 +405,23 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
         .eq("id", lobby.id);
       setGs(next);
       setPhase("ended");
+      // Notify the guesser that the result is in.
+      notifChannelRef.current?.send({
+        type: "broadcast",
+        event: "guess",
+        payload: { type: "resolved", winner: by },
+      });
     } else {
       // Wrong guess or rejected -> clear pending, guesser loses their turn.
       await updateGameState(lobby.id, (g) => ({ ...g, pending_guess: null }));
       setInfo(
         confirm ? "Incorrect! That guess was wrong." : "Guess rejected."
       );
+      notifChannelRef.current?.send({
+        type: "broadcast",
+        event: "guess",
+        payload: { type: "resolved", winner: null },
+      });
     }
   }
 
@@ -344,6 +441,7 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
       ...g,
       winner,
       won_by_guess: false,
+      pending_guess: null,
       ended_at: new Date().toISOString(),
     }));
     await supabase
@@ -407,10 +505,44 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
       )}
 
       {phase !== "waiting" && celebrities.length > 0 && (
-        <div
-          className={`grid gap-4 ${isLocal ? "lg:grid-cols-1" : "lg:grid-cols-[1fr_320px]"
-            }`}
-        >
+        <div className="space-y-4">
+          {/* TOP: video + chat controls (online mode) */}
+          {!isLocal && (
+            <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
+              <div className="rounded-xl bg-tolly-panel/70 p-3">
+                <VideoOverlay
+                  peer={peer}
+                  remoteStream={remoteStream}
+                  localStream={localStream}
+                  statusLabel={statusLabel}
+                  selfName={userName}
+                  remoteName={isCreator ? "Guest" : "Host"}
+                />
+              </div>
+              <div className="h-80 overflow-hidden rounded-xl bg-tolly-panel/70">
+                <Chat
+                  messages={messages}
+                  myId={userId}
+                  onSend={sendChat}
+                  disabled={phase === "ended"}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Local mode note (no video/audio/chat needed) */}
+          {isLocal && (
+            <div className="rounded-xl bg-tolly-panel/70 p-4 text-center">
+              <p className="text-sm font-semibold text-tolly-gold">
+                Local mode
+              </p>
+              <p className="mt-1 text-xs text-tolly-muted">
+                You&apos;re sharing one screen — ask your questions out loud.
+                Camera, mic and chat are disabled.
+              </p>
+            </div>
+          )}
+
           <div className="space-y-3">
             {phase === "selection" && (
               <div className="rounded-xl bg-tolly-panel/70 p-3">
@@ -422,14 +554,31 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
                 </div>
                 <p className="mb-2 text-xs text-tolly-muted">
                   Click a card to be that celebrity. Your opponent must guess it.
+                  Then press <b>Confirm</b> — the game starts only once you{" "}
+                  <b>both</b> confirm.
                 </p>
                 <GameBoard
                   celebrities={celebrities}
                   eliminated={[]}
+                  mySelection={myPick ?? undefined}
                   phase="select"
                   onSelectCharacter={selectCharacter}
                   onToggleEliminate={() => { }}
                 />
+                <div className="mt-3 flex items-center justify-between">
+                  <span className="text-xs text-tolly-muted">
+                    {gs?.selection_confirmed?.[userId]
+                      ? "✓ You confirmed"
+                      : "Pick a card, then confirm"}
+                  </span>
+                  <Button
+                    variant="primary"
+                    disabled={!myPick || !!gs?.selection_confirmed?.[userId]}
+                    onClick={() => void confirmSelection()}
+                  >
+                    {gs?.selection_confirmed?.[userId] ? "Confirmed" : "Confirm"}
+                  </Button>
+                </div>
               </div>
             )}
 
@@ -473,45 +622,6 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
               />
             )}
           </div>
-
-          {/* Right rail: video + chat (online mode only) */}
-          {!isLocal && (
-            <div className="space-y-4">
-              <div className="rounded-xl bg-tolly-panel/70 p-3">
-                <VideoOverlay
-                  peer={peer}
-                  remoteStream={remoteStream}
-                  localStream={localStream}
-                  statusLabel={statusLabel}
-                  selfName={userName}
-                  remoteName={isCreator ? "Guest" : "Host"}
-                />
-              </div>
-              <div className="h-72 overflow-hidden rounded-xl bg-tolly-panel/70">
-                <Chat
-                  messages={messages}
-                  myId={userId}
-                  onSend={sendChat}
-                  disabled={phase === "ended"}
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Local mode note (no video/audio/chat needed) */}
-          {isLocal && (
-            <div className="space-y-4">
-              <div className="rounded-xl bg-tolly-panel/70 p-4 text-center">
-                <p className="text-sm font-semibold text-tolly-gold">
-                  Local mode
-                </p>
-                <p className="mt-1 text-xs text-tolly-muted">
-                  You&apos;re sharing one screen — ask your questions out loud.
-                  Camera, mic and chat are disabled.
-                </p>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -539,6 +649,7 @@ function emptyState(): GameState {
     celebrities: [],
     selection_started_at: null,
     selections: {},
+    selection_confirmed: {},
     main_started_at: null,
     eliminated: {},
     pending_guess: null,

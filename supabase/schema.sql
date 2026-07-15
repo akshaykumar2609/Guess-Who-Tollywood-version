@@ -33,9 +33,14 @@ language plpgsql
 security definer set search_path = public
 as $$
 begin
-  insert into public.profiles (id, email)
-  values (new.id, new.email)
-  on conflict (id) do nothing;
+  begin
+    insert into public.profiles (id, email)
+    values (new.id, new.email)
+    on conflict (id) do nothing;
+  exception when others then
+    -- Log warning but do not block user signup with 500 error
+    raise warning 'Error in handle_new_user trigger: %', SQLERRM;
+  end;
   return new;
 end;
 $$;

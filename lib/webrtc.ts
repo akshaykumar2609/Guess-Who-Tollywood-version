@@ -195,10 +195,14 @@ export class Peer {
           this.send({ description: pc.localDescription!.toJSON() });
         }
       } else if (sig.candidate) {
-        try {
-          await pc.addIceCandidate(sig.candidate);
-        } catch (err) {
-          if (!this.ignoreOffer) console.warn("ICE add failed:", err);
+        if (!pc.remoteDescription) {
+          this.pendingCandidates.push(sig.candidate);
+        } else {
+          try {
+            await pc.addIceCandidate(sig.candidate);
+          } catch (err) {
+            if (!this.ignoreOffer) console.warn("ICE add failed:", err);
+          }
         }
       }
     } catch (err) {

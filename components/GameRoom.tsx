@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/router";
 import { supabase } from "../lib/supabaseClient";
 import {
   getLobby,
@@ -24,6 +25,7 @@ interface GameRoomProps {
 type Phase = "connecting" | "waiting" | "selection" | "main" | "ended";
 
 export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
+  const router = useRouter();
   const [lobby, setLobby] = useState<Lobby | null>(null);
   const [gs, setGs] = useState<GameState | null>(null);
   const [celebrities, setCelebrities] = useState<Celebrity[]>([]);
@@ -123,11 +125,24 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
     const notif = supabase
       .channel(`notif-${lobbyId}`)
       .on("broadcast", { event: "guess" }, ({ payload }) => {
-        const p = payload as { type: string };
+        const p = payload as { type: string; winner?: string | null };
         if (p.type === "submitted") {
           setInfo("Opponent is reviewing your guess…");
         } else if (p.type === "resolved") {
           setInfo("Opponent responded to your guess.");
+          if (p.winner) {
+            setGs((currentGs) => {
+              if (!currentGs) return null;
+              return {
+                ...currentGs,
+                winner: p.winner!,
+                won_by_guess: true,
+                pending_guess: null,
+                ended_at: new Date().toISOString(),
+              };
+            });
+            setPhase("ended");
+          }
         }
       })
       .subscribe();
@@ -233,6 +248,37 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, gs?.main_started_at, lobby?.celebrity_count]);
+
+  // ---------- Confirm exit during active game ----------
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (phase === "selection" || phase === "main") {
+        e.preventDefault();
+        e.returnValue = "Are you sure you want to exit the game? Your progress will be lost.";
+        return e.returnValue;
+      }
+    };
+
+    const handleRouteChange = (url: string) => {
+      if (phase === "selection" || phase === "main") {
+        const confirmExit = window.confirm(
+          "Are you sure you want to exit the game? Your progress will be lost."
+        );
+        if (!confirmExit) {
+          router.events.emit("routeChangeError");
+          throw "routeChange aborted";
+        }
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    router.events.on("routeChangeStart", handleRouteChange);
+
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      router.events.off("routeChangeStart", handleRouteChange);
+    };
+  }, [phase, router]);
 
   // ---------- Setup WebRTC peer once we know both players ----------
   // Skip entirely in local mode (no camera/mic needed).
@@ -392,18 +438,25 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
     if (!lobby || !gs?.pending_guess) return;
     const { by, celebrityId } = gs.pending_guess;
     if (confirm && gs.selections[userId] === celebrityId) {
-      const next = await updateGameState(lobby.id, (g) => ({
-        ...g,
+      const nextGs = {
+        ...gs,
         winner: by,
         won_by_guess: true,
         pending_guess: null,
         ended_at: new Date().toISOString(),
-      }));
-      await supabase
+      };
+      const { error } = await supabase
         .from("lobbies")
-        .update({ status: "completed" })
+        .update({
+          game_state: nextGs,
+          status: "completed",
+        })
         .eq("id", lobby.id);
-      setGs(next);
+      if (error) {
+        setError(error.message);
+        return;
+      }
+      setGs(nextGs);
       setPhase("ended");
       // Notify the guesser that the result is in.
       notifChannelRef.current?.send({
@@ -413,7 +466,19 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
       });
     } else {
       // Wrong guess or rejected -> clear pending, guesser loses their turn.
-      await updateGameState(lobby.id, (g) => ({ ...g, pending_guess: null }));
+      const nextGs = {
+        ...gs,
+        pending_guess: null,
+      };
+      const { error } = await supabase
+        .from("lobbies")
+        .update({ game_state: nextGs })
+        .eq("id", lobby.id);
+      if (error) {
+        setError(error.message);
+        return;
+      }
+      setGs(nextGs);
       setInfo(
         confirm ? "Incorrect! That guess was wrong." : "Guess rejected."
       );
@@ -437,19 +502,49 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
       (gs.selections[remoteId ?? ""] ? 1 : 0);
     const winner =
       myAlive === 1 ? userId : oppAlive === 1 ? remoteId ?? userId : userId;
-    const next = await updateGameState(lobby.id, (g) => ({
-      ...g,
+    
+    const nextGs = {
+      ...gs,
       winner,
       won_by_guess: false,
       pending_guess: null,
       ended_at: new Date().toISOString(),
-    }));
-    await supabase
+    };
+    
+    const { error } = await supabase
       .from("lobbies")
-      .update({ status: "completed" })
+      .update({
+        game_state: nextGs,
+        status: "completed",
+      })
       .eq("id", lobby.id);
-    setGs(next);
+    if (error) {
+      setError(error.message);
+      return;
+    }
+    setGs(nextGs);
     setPhase("ended");
+  }
+
+  async function playAgain() {
+    if (!lobby) return;
+    try {
+      setInfo("Resetting lobby…");
+      const { error } = await supabase
+        .from("lobbies")
+        .update({
+          status: "ready",
+          game_state: {},
+        })
+        .eq("id", lobby.id);
+      if (error) throw error;
+      setGs(emptyState());
+      setPhase("waiting");
+      setInfo(null);
+      mainStartedRef.current = false;
+    } catch (e: any) {
+      setError(e.message);
+    }
   }
 
   function sendChat(text: string) {
@@ -530,16 +625,26 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
             </div>
           )}
 
-          {/* Local mode note (no video/audio/chat needed) */}
+          {/* Local mode note with chat support */}
           {isLocal && (
-            <div className="rounded-xl bg-tolly-panel/70 p-4 text-center">
-              <p className="text-sm font-semibold text-tolly-gold">
-                Local mode
-              </p>
-              <p className="mt-1 text-xs text-tolly-muted">
-                You&apos;re sharing one screen — ask your questions out loud.
-                Camera, mic and chat are disabled.
-              </p>
+            <div className="grid gap-4 md:grid-cols-[1fr_320px]">
+              <div className="rounded-xl bg-tolly-panel/70 p-4 text-center flex flex-col justify-center">
+                <p className="text-sm font-semibold text-tolly-gold">
+                  Local mode
+                </p>
+                <p className="mt-1 text-xs text-tolly-muted">
+                  You&apos;re sharing one screen — ask your questions out loud.
+                  Camera and mic are disabled, but you can use the chat log below for notes or tracking.
+                </p>
+              </div>
+              <div className="h-80 overflow-hidden rounded-xl bg-tolly-panel/70">
+                <Chat
+                  messages={messages}
+                  myId={userId}
+                  onSend={sendChat}
+                  disabled={phase === "ended"}
+                />
+              </div>
             </div>
           )}
 
@@ -619,6 +724,8 @@ export default function GameRoom({ lobbyId, userId, userName }: GameRoomProps) {
                   celebrities.find((c) => c.id === gs?.selections[remoteId ?? ""])
                     ?.name
                 }
+                isCreator={isCreator}
+                onPlayAgain={playAgain}
               />
             )}
           </div>
@@ -826,34 +933,41 @@ function EndView({
   won,
   wonByGuess,
   opponentChar,
+  isCreator,
+  onPlayAgain,
 }: {
   won: boolean;
   wonByGuess: boolean | null;
   opponentChar?: string;
+  isCreator: boolean;
+  onPlayAgain: () => void;
 }) {
   return (
-    <div className="rounded-2xl bg-tolly-panel/70 p-8 text-center">
+    <div className="rounded-2xl bg-tolly-panel/70 p-8 text-center animate-fade-in">
       <h2
-        className={`mb-2 text-2xl font-bold ${won ? "text-tolly-gold" : "text-red-400"
-          }`}
+        className={`mb-2 text-2xl font-bold ${won ? "text-tolly-gold" : "text-red-400"}`}
       >
         {won ? "🎉 You win!" : "You lost"}
       </h2>
       {opponentChar && (
         <p className="text-sm text-tolly-muted">
-          Opponent was{" "}
-          <span className="font-semibold text-white">{opponentChar}</span>.
+          Opponent was <span className="font-semibold text-white">{opponentChar}</span>.
         </p>
       )}
       <p className="mt-2 text-xs text-tolly-muted">
         {wonByGuess ? "Won by correct guess." : "Decided by elimination at time-up."}
       </p>
-      <Link
-        href="/"
-        className="mt-4 inline-block rounded-xl bg-tolly-red px-4 py-2 text-sm font-medium text-white"
-      >
-        Back to home
-      </Link>
+      <div className="mt-6 flex flex-col justify-center gap-3 sm:flex-row">
+        <Button onClick={onPlayAgain} variant="primary">
+          Play Again (Rematch)
+        </Button>
+        <Link
+          href="/"
+          className="rounded-xl bg-tolly-red/80 hover:bg-tolly-red px-6 py-2 text-sm font-semibold text-white transition-colors flex items-center justify-center"
+        >
+          Back to home
+        </Link>
+      </div>
     </div>
   );
 }
